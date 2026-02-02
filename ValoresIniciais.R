@@ -1,5 +1,5 @@
-# Nome: ValoresIniciais_gamma_t_Lambda_it_T23_w09.R
-# Objetivo: Simular dados (T=23) com estrutura CUMULATIVA CORRETA baseada em clAI.
+# Nome: ValoresIniciais_gamma_FIXO_Lambda_it.R
+# Objetivo: Simular dados (T=23) com Gamma e Epsilon FIXOS no tempo.
 
 # Carregar dados originais
 if(file.exists("_dataCaseStudy.r")) {
@@ -9,7 +9,7 @@ if(file.exists("_dataCaseStudy.r")) {
 }
 
 set.seed(987)
-cat("--- Iniciando Simulação CUMULATIVA (T=23, w=0.9) ---\n")
+cat("--- Iniciando Simulação (Gamma/Epsilon FIXOS, T=23) ---\n")
 
 # --- PASSO 1: DEFINIR PARÂMETROS E CLUSTERS ---
 n_regions <- 75 
@@ -21,47 +21,38 @@ K         <- 4
 beta_true  <- c(-1.0, 1.0, 0.5) 
 li_w = 0.7
 ls_w = 0.99
-w_true     <- runif(75,li_w,ls_w)
+w_true     <- runif(75, li_w, ls_w)
 a0_true    <- 1.0
 b0_true    <- 1.0
 
-# --- CORREÇÃO CRÍTICA DOS CLUSTERS ---
-# O vetor clAI original tem: 4 (Melhor) ... 1 (Pior)
-# Nós queremos: Cluster 1 (Melhor) ... Cluster 4 (Pior)
-# Fórmula de conversão:
+# --- CORREÇÃO DOS CLUSTERS ---
+# Cluster 1 (Melhor) ... Cluster 4 (Pior)
 cluster_ids <- 5 - clAI 
 
-# Construir a Matriz h CUMULATIVA correta para o Nimble e para a Geração
-# Lógica: Se região é Cluster 3, ela sofre penalidade de gamma1 + gamma2 + gamma3.
-# Logo, a linha correspondente em h deve ser [1, 1, 1, 0]
+# Matriz h CUMULATIVA (Fixa para as regiões)
 h_cumulativo <- matrix(0, nrow = n_regions, ncol = K)
 for(i in 1:n_regions) {
   k <- cluster_ids[i]
   h_cumulativo[i, 1:k] <- 1
 }
 
-# --- PASSO 2: DEFINIR GAMMAS ---
-gamma_true <- matrix(NA, nrow = K, ncol = n_times)
+# --- PASSO 2: DEFINIR GAMMAS (FIXOS) ---
+# Agora é um vetor de tamanho K, não mais uma matriz K x T
+gamma_true <- c(0.05, 0.10, 0.10, 0.15) 
+# Cluster 1: 0.05
+# Cluster 2: 0.05 + 0.10 = 0.15
+# Cluster 3: 0.15 + 0.10 = 0.25
+# Cluster 4: 0.25 + 0.15 = 0.40
 
-# Definindo valores (Base + Adicionais)
-gamma_true[1, ] <- c(rep(0.05, n_times)) # Penalidade Base (Cluster 1)
-gamma_true[2, ] <- c(rep(0.10, n_times)) # Adicional p/ Cluster 2
-gamma_true[3, ] <- c(rep(0.10, n_times)) # Adicional p/ Cluster 3
-gamma_true[4, ] <- c(rep(0.15, n_times)) # Adicional p/ Cluster 4
+# --- PASSO 3: SIMULAR EPSILON (FIXO POR REGIÃO) ---
+cat("--- Calculando Epsilon Fixo ---\n")
 
-# --- PASSO 3: SIMULAR EPSILON CUMULATIVO ---
-cat("--- Calculando Epsilon Cumulativo (Baseado em clAI) ---\n")
+epsilon_true <- numeric(n_regions)
 
-epsilon_true <- matrix(NA, nrow = n_regions, ncol = n_times)
-
-for(t in 1:n_times) {
-  for(i in 1:n_regions) {
-    # Soma dos gammas ativados pela matriz h_cumulativo
-    # Isso equivale a sum(gamma_true[1:cluster_ids[i], t])
-    penalidade <- sum(h_cumulativo[i, ] * gamma_true[, t])
-    
-    epsilon_true[i, t] <- 1 - penalidade
-  }
+for(i in 1:n_regions) {
+  # Penalidade é fixa no tempo
+  penalidade <- sum(h_cumulativo[i, ] * gamma_true)
+  epsilon_true[i] <- 1 - penalidade
 }
 
 # Simulando Covariáveis e E
@@ -69,12 +60,13 @@ x_true <- array(rnorm(n_regions * n_times * p), dim = c(n_regions, n_times, p))
 E_raw  <- matrix(runif(n_regions * n_times, 150, 250), nrow = n_regions)
 E_true <- E_raw / mean(E_raw) 
 
-# Calcular g_it
+# Calcular g_it (Agora usa epsilon_true[i] fixo)
 g_it_true <- array(NA, dim = c(n_regions, n_times))
 for(i in 1:n_regions) {
   for(t in 1:n_times) {
     prod_val <- sum(x_true[i, t, ] * beta_true)
-    g_it_true[i, t] <- E_true[i, t] * epsilon_true[i, t] * exp(prod_val)
+    # Epsilon não tem índice t
+    g_it_true[i, t] <- E_true[i, t] * epsilon_true[i] * exp(prod_val)
   }
 }
 
@@ -114,15 +106,15 @@ constants_nimble <- list(
   n_times   = n_times, 
   p         = p, 
   K         = K, 
-  h         = h_cumulativo, # Matriz H Corrigida e Cumulativa
+  h         = h_cumulativo,
   mu_beta   = rep(0, p),
-  a_unif    = c(rep(0.0, n_times)), 
-  b_unif    = c(rep(0.1, n_times)),  
-  delta     = 0.05, 
+  # Limites para o primeiro gamma (escalares agora)
+  a_unif    = 0.0, 
+  b_unif    = 0.1,  
   a0        = a0_true, 
   b0        = b0_true, 
-  li_w = li_w,
-  ls_w = ls_w
+  li_w      = li_w,
+  ls_w      = ls_w
 )
 
 data_nimble <- list(
@@ -131,22 +123,24 @@ data_nimble <- list(
   x = x_true
 )
 
+# Inits agora passam vetores para gamma, não matrizes
 inits_nimble_1 <- list(
   beta   = beta_true,
   gamma  = gamma_true,
-  lambda = lambda_true 
+  lambda = lambda_true,
+  w      = w_true
 )
 
-gamma_init_2 <- matrix(gamma_true*0.9, nrow = K, ncol = n_times)
+gamma_init_2 <- gamma_true * 0.9
 inits_nimble_2 <- list(
   beta   = rnorm(p, 0, 0.5),
   gamma  = gamma_init_2,
-  lambda = matrix(rgamma(n_regions * n_times, 1, 1), nrow = n_regions)
+  lambda = matrix(rgamma(n_regions * n_times, 1, 1), nrow = n_regions),
+  w      = runif(n_regions, li_w, ls_w)
 )
 
 inits_list_nimble <- list(inits_nimble_1, inits_nimble_2)
 
-cat("--- Simulação Concluída e Objetos Prontos (Usando clAI para clusters) ---\n")
-# Verifica visualmente os Epsilons gerados
-print("Resumo dos Epsilons por Cluster (Tempo 1):")
-print(tapply(epsilon_true[,1], cluster_ids, mean))
+cat("--- Simulação Concluída (Gamma Fixo) ---\n")
+print("Epsilon por Cluster (Valores Únicos):")
+print(tapply(epsilon_true, cluster_ids, mean))

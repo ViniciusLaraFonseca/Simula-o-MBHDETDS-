@@ -21,7 +21,7 @@ K         <- 4
 beta_true  <- c(-1.0, 1.0, 0.5) 
 li_w = 0.7
 ls_w = 0.99
-w_true     <- runif(75,li_w,ls_w)
+w_true     <- runif(n_regions,li_w,ls_w)
 a0_true    <- 1.0
 b0_true    <- 1.0
 
@@ -134,14 +134,16 @@ data_nimble <- list(
 inits_nimble_1 <- list(
   beta   = beta_true,
   gamma  = gamma_true,
-  lambda = lambda_true 
+  lambda = lambda_true,
+  w = w_true
 )
 
 gamma_init_2 <- matrix(gamma_true*0.9, nrow = K, ncol = n_times)
 inits_nimble_2 <- list(
   beta   = rnorm(p, 0, 0.5),
   gamma  = gamma_init_2,
-  lambda = matrix(rgamma(n_regions * n_times, 1, 1), nrow = n_regions)
+  lambda = matrix(rgamma(n_regions * n_times, 1, 1), nrow = n_regions),
+  w = runif(n_regions,li_w,ls_w)
 )
 
 inits_list_nimble <- list(inits_nimble_1, inits_nimble_2)

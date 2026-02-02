@@ -1,9 +1,8 @@
 # ==============================================================================
-# 0. INÍCIO DO MARCADOR DE TEMPO E CARREGAMENTO DE DADOS
+# 0. INÍCIO
 # ==============================================================================
 inicio_execucao <- Sys.time()
 
-# Carregar bibliotecas
 library(nimble)
 library(coda)
 library(ggplot2)
@@ -11,35 +10,27 @@ library(gridExtra)
 library(dplyr)
 library(tidyr)
 
-cat("--- Carregando Valores Iniciais e Dados Simulados ---\n")
-# Certifique-se de que o arquivo "ValoresIniciais_gamma_t_Lambda_it_T23_w09.R" 
-# está na mesma pasta e é a versão CORRIGIDA (sem os "...")
+cat("--- Carregando Valores Iniciais e Dados ---\n")
 if(file.exists("ValoresIniciais.R")) {
   source("ValoresIniciais.R")
 } else {
-  stop("ERRO CRÍTICO: Arquivo 'ValoresIniciais_gamma_temporal_Lambda_it_T23_w09.R' não encontrado.")
+  stop("ERRO: Arquivo 'ValoresIniciais.R' não encontrado.")
 }
 
-# Verificação de segurança da matriz h
-if(is.null(constants_nimble$h)) stop("ERRO: A matriz 'h' não está em constants_nimble.")
-
 # ==============================================================================
-# 1. DEFINIÇÃO DO AMOSTRADOR FFBS (ffbs_sampler_Lambda_it)
+# 1. AMOSTRADOR FFBS (Ajustado para Epsilon Fixo)
 # ==============================================================================
 
 ffbs_sampler_Lambda_it <- nimbleFunction(
   contains = sampler_BASE,
   
   setup = function(model, mvSaved, target, control) {
-    
     n_regions <- control$n_regions
     n_times   <- control$n_times
     p         <- control$p
-    
     a0        <- control$a0
     b0        <- control$b0
     
-    # Buffers 1D
     buf_size <- n_regions * (n_times + 1)
     at_buf <- nimNumeric(buf_size, 0)
     bt_buf <- nimNumeric(buf_size, 0)
@@ -51,7 +42,6 @@ ffbs_sampler_Lambda_it <- nimbleFunction(
   },
   
   run = function() {
-    
     declare(i, integer())
     declare(t, integer())
     declare(k, integer())
@@ -82,7 +72,9 @@ ffbs_sampler_Lambda_it <- nimbleFunction(
         
         prod_val <- 0
         for(k in 1:p) prod_val <- prod_val + model$x[i, t, k] * model$beta[k]
-        g_it <- model$E[i, t] * model$epsilon[i, t] * exp(prod_val)
+        
+        # MUDANÇA AQUI: epsilon[i] não tem índice t
+        g_it <- model$E[i, t] * model$epsilon[i] * exp(prod_val)
         
         at_buf[idx_next] <<- att_t + model$Y[i, t]
         bt_buf[idx_next] <<- btt_t + g_it
@@ -97,7 +89,6 @@ ffbs_sampler_Lambda_it <- nimbleFunction(
       for(t_idx in 1:(n_times-1)) {
         t_back  <- n_times - t_idx
         idx_buf <- (i-1)*(n_times+1) + t_back + 1
-        
         lambda_futuro <- model$lambda[i, t_back + 1]
         
         shape_tmp <- (1 - model$w[i]) * at_buf[idx_buf]
@@ -111,48 +102,44 @@ ffbs_sampler_Lambda_it <- nimbleFunction(
     model$calculate(calcNodes)
     copy(from = model, to = mvSaved, row = 1, nodes = targetNodes, logProb = TRUE)
   },
-  
   methods = list(reset = function() {})
 )
 
 # ==============================================================================
-# 2. CÓDIGO DO MODELO
+# 2. CÓDIGO DO MODELO (Gamma Fixo)
 # ==============================================================================
 
-code_dynamic_gamma <- nimbleCode({
+code_static_gamma <- nimbleCode({
   
+  # Priors Beta
   for (j in 1:p) {
     beta[j] ~ dnorm(mu_beta[j], sd = 10)
   }
-  #Priors W
-  for (i in vector) {
-    w[i] ~ dunif(min = li_w,max = ls_w)
-  }
-  # Priors Gamma
   
-    for(t in 1:n_times){
-    # CORREÇÃO: Indexar lim_inf e lim_sup com [t] para evitar redefinição
-    
-    
-    gamma[1, t] ~ dunif(min = a_unif[t], max = b_unif[t])
-    
-    for(j in 2:K){
-      gamma[j, t] ~ dunif(min = 0, max = (1 - sum(gamma[1:(j-1), t])))
-    }
-  }
-  
-  # Epsilon (Depende da matriz h fornecida em constants)
-  
-  
+  # Priors W (CORRIGIDO: for numérico)
   for (i in 1:n_regions) {
+    w[i] ~ dunif(min = li_w, max = ls_w)
+  }
+  
+  # Priors Gamma (Sem loop de tempo)
+  gamma[1] ~ dunif(min = a_unif, max = b_unif)
+  for(j in 2:K){
+    gamma[j] ~ dunif(min = 0, max = (1 - sum(gamma[1:(j-1)])))
+  }
+  
+  # Likelihood
+  for (i in 1:n_regions) {
+    
+    # Epsilon Fixo (Fora do loop de tempo)
+    epsilon[i] <- 1 - inprod(h[i, 1:K], gamma[1:K])
+    
     for(t in 1:n_times){
-      # Epsilon (Depende da matriz h fornecida em constants)
-      epsilon[i, t] <- 1 - inprod(h[i, 1:K], gamma[1:K, t])
-      lambda[i, t] ~ dgamma(1, 1) 
-      mu[i, t] <- lambda[i, t] * E[i, t] * epsilon[i, t] * exp(inprod(beta[1:p], x[i, t, 1:p]))
-      Y[i, t] ~ dpois(mu[i, t])
+      lambda[i, t] ~ dgamma(1, 1) # Dummy prior para FFBS
       
-      # CORREÇÃO: Usar logLik_Y em vez de logProb_Y para evitar conflito de nomes
+      # mu usa epsilon[i] fixo
+      mu[i, t] <- lambda[i, t] * E[i, t] * epsilon[i] * exp(inprod(beta[1:p], x[i, t, 1:p]))
+      
+      Y[i, t] ~ dpois(mu[i, t])
       logLik_Y[i, t] <- log(dpois(Y[i, t], mu[i, t]))
     }
   }
@@ -163,9 +150,7 @@ code_dynamic_gamma <- nimbleCode({
 # ==============================================================================
 
 cat("--- Configurando MCMC ---\n")
-if(is.null(constants_nimble$delta)) constants_nimble$delta <- 0.05
-
-model <- nimbleModel(code = code_dynamic_gamma, constants = constants_nimble, 
+model <- nimbleModel(code = code_static_gamma, constants = constants_nimble, 
                      data = data_nimble, inits = inits_list_nimble[[1]])
 
 conf <- configureMCMC(model)
@@ -176,8 +161,8 @@ conf$addSampler(target = "lambda", type = ffbs_sampler_Lambda_it,
                                p = constants_nimble$p,
                                a0 = constants_nimble$a0, b0 = constants_nimble$b0))
 
-# CORREÇÃO: Monitorar logLik_Y
-conf$addMonitors(c("beta", "gamma", "lambda", "epsilon", "logLik_Y"))
+# MUDANÇA: Adicionado "w" nos monitores
+conf$addMonitors(c("beta", "gamma", "lambda", "epsilon", "logLik_Y", "w"))
 
 cat("--- Compilando ---\n")
 Cmodel <- compileNimble(model)
@@ -225,18 +210,13 @@ for(j in 1:constants_nimble$p) {
   }
 }
 
-# Gammas (Avg Temporal)
+# Gammas (Agora Fixo - Sem loop de tempo)
 for(k in 1:constants_nimble$K) {
-  bias_sum <- 0; mse_sum <- 0; cov_sum <- 0
-  for(t in 1:constants_nimble$n_times) {
-    p_name <- paste0("gamma[", k, ", ", t, "]")
-    if(p_name %in% colnames(samples_mat)) {
-      res <- calc_metrics_relative(samples_mat[, p_name], gamma_true[k, t])
-      bias_sum <- bias_sum + res["RelBias"]; mse_sum <- mse_sum + res["RelMSE"]; cov_sum <- cov_sum + res["Cov95"]
-    }
+  p_name <- paste0("gamma[", k, "]")
+  if(p_name %in% colnames(samples_mat)) {
+    # gamma_true agora é um vetor, usamos gamma_true[k] direto
+    metrics_list[[length(metrics_list) + 1]] <- c(Parameter = p_name, Type = "Gamma", calc_metrics_relative(samples_mat[, p_name], gamma_true[k]))
   }
-  metrics_list[[length(metrics_list) + 1]] <- c(Parameter = paste0("Gamma_Cluster_", k), Type = "Gamma_Avg", Mean=NA, True=NA, 
-                                                RelBias=bias_sum/constants_nimble$n_times, RelMSE=mse_sum/constants_nimble$n_times, RelRMSE=sqrt(mse_sum/constants_nimble$n_times), Cov95=cov_sum/constants_nimble$n_times)
 }
 
 # Lambda/Epsilon por Cluster
@@ -245,20 +225,32 @@ for(k in 1:4) {
   count <- 0; l_bias <- 0; l_mse <- 0; l_cov <- 0; e_bias <- 0; e_mse <- 0; e_cov <- 0
   
   for(i in regs) {
+    # Métricas de Lambda (Temporal)
     for(t in 1:constants_nimble$n_times) {
-      nm_l <- paste0("lambda[", i, ", ", t, "]"); nm_e <- paste0("epsilon[", i, ", ", t, "]")
-      if(nm_l %in% colnames(samples_mat) && nm_e %in% colnames(samples_mat)) {
+      nm_l <- paste0("lambda[", i, ", ", t, "]")
+      if(nm_l %in% colnames(samples_mat)) {
         res_l <- calc_metrics_relative(samples_mat[, nm_l], lambda_true[i, t])
-        res_e <- calc_metrics_relative(samples_mat[, nm_e], epsilon_true[i, t])
         l_bias <- l_bias + res_l["RelBias"]; l_mse <- l_mse + res_l["RelMSE"]; l_cov <- l_cov + res_l["Cov95"]
-        e_bias <- e_bias + res_e["RelBias"]; e_mse <- e_mse + res_e["RelMSE"]; e_cov <- e_cov + res_e["Cov95"]
-        count <- count + 1
+        count <- count + 1 # Conta amostras totais de lambda (Regiões * Tempos)
       }
     }
+    
+    # Métricas de Epsilon (Fixo - Uma por região)
+    nm_e <- paste0("epsilon[", i, "]")
+    if(nm_e %in% colnames(samples_mat)) {
+      res_e <- calc_metrics_relative(samples_mat[, nm_e], epsilon_true[i])
+      # Como epsilon é fixo por região, somamos aqui e dividimos pelo numero de regioes no final
+      e_bias <- e_bias + res_e["RelBias"]; e_mse <- e_mse + res_e["RelMSE"]; e_cov <- e_cov + res_e["Cov95"]
+    }
   }
-  if(count>0) {
+  
+  if(count > 0) {
+    # Para Lambda dividimos pelo count total (N_regs * T)
     metrics_list[[length(metrics_list)+1]] <- c(Parameter=paste0("Lambda_Cl_", k), Type="Lambda_Cl", Mean=NA, True=NA, RelBias=l_bias/count, RelMSE=l_mse/count, RelRMSE=sqrt(l_mse/count), Cov95=l_cov/count)
-    metrics_list[[length(metrics_list)+1]] <- c(Parameter=paste0("Epsilon_Cl_", k), Type="Epsilon_Cl", Mean=NA, True=NA, RelBias=e_bias/count, RelMSE=e_mse/count, RelRMSE=sqrt(e_mse/count), Cov95=e_cov/count)
+    
+    # Para Epsilon dividimos pelo número de regiões no cluster (pois só tem 1 epsilon por região)
+    n_regs_k <- length(regs)
+    metrics_list[[length(metrics_list)+1]] <- c(Parameter=paste0("Epsilon_Cl_", k), Type="Epsilon_Cl", Mean=NA, True=NA, RelBias=e_bias/n_regs_k, RelMSE=e_mse/n_regs_k, RelRMSE=sqrt(e_mse/n_regs_k), Cov95=e_cov/n_regs_k)
   }
 }
 
@@ -294,7 +286,7 @@ roi_info <- all_regions_info[all_regions_info$Region %in% regions_of_interest, ]
 roi_info <- roi_info[order(roi_info$Cluster, roi_info$Region), ]
 roi_info$Label <- paste0("Região ", roi_info$Region, " (Cl ", roi_info$Cluster, ")")
 
-df_lambda <- data.frame(); df_epsilon <- data.frame()
+df_lambda <- data.frame()
 
 for(i in roi_info$Region) {
   lbl <- roi_info$Label[roi_info$Region == i]
@@ -305,42 +297,28 @@ for(i in roi_info$Region) {
       vec <- samples_mat[, nm]
       df_lambda <- rbind(df_lambda, data.frame(Region=i, Label=lbl, Time=t, True=lambda_true[i,t], Est=mean(vec), Lower=quantile(vec,0.025), Upper=quantile(vec,0.975)))
     }
-    # Epsilon
-    nm <- paste0("epsilon[", i, ", ", t, "]")
-    if(nm %in% colnames(samples_mat)) {
-      vec <- samples_mat[, nm]
-      df_epsilon <- rbind(df_epsilon, data.frame(Region=i, Label=lbl, Time=t, True=epsilon_true[i,t], Est=mean(vec), Lower=quantile(vec,0.025), Upper=quantile(vec,0.975)))
-    }
   }
 }
 df_lambda$Label <- factor(df_lambda$Label, levels=roi_info$Label)
-df_epsilon$Label <- factor(df_epsilon$Label, levels=roi_info$Label)
 
 p1 <- ggplot(df_lambda, aes(x=Time)) + geom_ribbon(aes(ymin=Lower, ymax=Upper), fill="grey70", alpha=0.5) +
   geom_line(aes(y=Est), color="black") + geom_line(aes(y=True), color="red", linetype="dashed") +
   facet_wrap(~Label, ncol=3, scales="fixed") + theme_bw() + labs(title="Painel Lambda", y=expression(lambda))
 ggsave("plots_output/painel_lambda.png", p1, width=12, height=10)
 
-p2 <- ggplot(df_epsilon, aes(x=Time)) + geom_ribbon(aes(ymin=Lower, ymax=Upper), fill="grey70", alpha=0.5) +
-  geom_line(aes(y=Est), color="black") + geom_line(aes(y=True), color="red", linetype="dashed") +
-  facet_wrap(~Label, ncol=3, scales="fixed") + theme_bw() + labs(title="Painel Epsilon", y=expression(epsilon))
-ggsave("plots_output/painel_epsilon.png", p2, width=12, height=10)
-
-# B. PAINEL GAMMA (Diagnóstico)
-df_gamma <- data.frame()
+# B. TRACEPLOT GAMMA (Alterado para Traceplot)
+df_gamma_trace <- data.frame()
 for(k in 1:constants_nimble$K) {
-  for(t in 1:constants_nimble$n_times) {
-    nm <- paste0("gamma[", k, ", ", t, "]")
-    if(nm %in% colnames(samples_mat)) {
-      vec <- samples_mat[, nm]
-      df_gamma <- rbind(df_gamma, data.frame(Time=t, Cluster=paste("Cluster", k), True=gamma_true[k,t], Est=mean(vec), Lower=quantile(vec,0.025), Upper=quantile(vec,0.975)))
-    }
+  nm <- paste0("gamma[", k, "]")
+  if(nm %in% colnames(samples_mat)) {
+    df_gamma_trace <- rbind(df_gamma_trace, data.frame(Iter=1:nrow(samples_mat), Value=samples_mat[,nm], Param=nm, True=gamma_true[k]))
   }
 }
-p3 <- ggplot(df_gamma, aes(x=Time)) + geom_ribbon(aes(ymin=Lower, ymax=Upper), fill="grey80", alpha=0.5) +
-  geom_line(aes(y=Est), color="black") + geom_line(aes(y=True), color="red", linetype="dashed") +
-  facet_wrap(~Cluster, scales="fixed") + theme_bw() + labs(title="Painel Gammas", y=expression(gamma))
-ggsave("plots_output/painel_gammas.png", p3, width=10, height=8)
+
+p3 <- ggplot(df_gamma_trace, aes(x=Iter, y=Value)) + geom_line(alpha=0.6, size=0.3) +
+  geom_hline(aes(yintercept=True), color="red", linetype="dashed") +
+  facet_grid(Param~., scales="free_y") + theme_bw() + labs(title="Traceplots Gamma")
+ggsave("plots_output/traceplots_gamma.png", p3, width=8, height=6)
 
 # C. TRACEPLOTS BETA
 df_beta <- data.frame()
@@ -355,23 +333,75 @@ p4 <- ggplot(df_beta, aes(x=Iter, y=Value)) + geom_line(alpha=0.6, size=0.3) +
   facet_grid(Param~., scales="free_y") + theme_bw() + labs(title="Traceplots Beta")
 ggsave("plots_output/traceplots_beta.png", p4, width=8, height=6)
 
-# D. DIAGNÓSTICO EPSILON (MÉDIO POR CLUSTER)
-df_eps_diag <- data.frame()
-for(k in 1:4) {
-  reg_rep <- all_regions_info$Region[all_regions_info$Cluster == k][1]
-  for(t in 1:constants_nimble$n_times) {
-    nm <- paste0("epsilon[", reg_rep, ", ", t, "]")
-    if(nm %in% colnames(samples_mat)) {
-      vec <- samples_mat[, nm]
-      df_eps_diag <- rbind(df_eps_diag, data.frame(Time=t, Cluster=paste("Cluster", k), True=epsilon_true[reg_rep,t], Est=mean(vec), Lower=quantile(vec,0.025), Upper=quantile(vec,0.975)))
-    }
+# D. W (ESPACIAL) - MANTIDO
+# 1. Extração e Cálculo de Métricas por Região
+cat("Calculando métricas para os 75 w's...\n")
+
+df_w_results <- data.frame(
+  Region = 1:75,
+  True = w_true,  # Do script ValoresIniciais.R
+  Est_Mean = NA, Est_Lower = NA, Est_Upper = NA, Bias = NA, MSE = NA, Coverage95 = NA
+)
+
+for(i in 1:75) {
+  param_name <- paste0("w[", i, "]")
+  if(param_name %in% colnames(samples_mat)) {
+    samp_vec <- samples_mat[, param_name]
+    mean_val <- mean(samp_vec)
+    ci       <- quantile(samp_vec, probs = c(0.025, 0.975))
+    true_val <- w_true[i]
+    
+    df_w_results$Est_Mean[i]  <- mean_val
+    df_w_results$Est_Lower[i] <- ci[1]
+    df_w_results$Est_Upper[i] <- ci[2]
+    df_w_results$Bias[i]      <- mean_val - true_val
+    df_w_results$MSE[i]       <- (mean_val - true_val)^2 + var(samp_vec)
+    df_w_results$Coverage95[i] <- as.integer(true_val >= ci[1] & true_val <= ci[2])
   }
 }
-p5 <- ggplot(df_eps_diag, aes(x=Time)) + geom_ribbon(aes(ymin=Lower, ymax=Upper), fill="lightblue", alpha=0.5) +
-  geom_line(aes(y=Est), color="blue") + geom_line(aes(y=True), color="red", linetype="dashed") +
-  facet_wrap(~Cluster, scales="fixed") + theme_bw() + labs(title="Diagnóstico Epsilon Médio")
-ggsave("plots_output/diagnostico_epsilon_medio.png", p5, width=10, height=8)
 
+# 2. Métricas Gerais (Resumo Global)
+global_metrics <- data.frame(
+  Metric = c("Average Bias", "Global RMSE", "Average MSE", "Coverage Rate (95%)"),
+  Value = c(
+    mean(df_w_results$Bias, na.rm=TRUE),
+    sqrt(mean(df_w_results$MSE, na.rm=TRUE)),
+    mean(df_w_results$MSE, na.rm=TRUE),
+    mean(df_w_results$Coverage95, na.rm=TRUE)
+  )
+)
+print("--- Métricas Globais para w ---")
+print(global_metrics)
+write.csv(global_metrics, "metricas_globais_w.csv", row.names = FALSE)
+
+# 3. Gráficos de Diagnóstico
+# Gráfico A: Estimado vs Verdadeiro
+p_w1 <- ggplot(df_w_results, aes(x = True, y = Est_Mean)) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  geom_errorbar(aes(ymin = Est_Lower, ymax = Est_Upper), color = "grey70", width = 0.005) +
+  geom_point(color = "blue", size = 2, alpha = 0.7) +
+  labs(title = "Recuperação do w: Estimado vs Verdadeiro",
+       subtitle = "Barras cinzas indicam IC 95%",
+       x = "w Verdadeiro", y = "w Estimado (Média a Posteriori)") + theme_bw()
+
+# Gráfico B: Viés por Região
+p_w2 <- ggplot(df_w_results, aes(x = Region, y = Bias)) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_segment(aes(x = Region, xend = Region, y = 0, yend = Bias), color = "grey50") +
+  geom_point(aes(color = abs(Bias)), size = 2) +
+  scale_color_gradient(low = "blue", high = "red", name = "|Viés|") +
+  labs(title = "Viés do w por Região", x = "Índice da Região", y = "Viés (Média - True)") + theme_bw()
+
+# Gráfico C: EQM (MSE) por Região
+p_w3 <- ggplot(df_w_results, aes(x = Region, y = MSE)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.8) +
+  labs(title = "Erro Quadrático Médio (MSE) por Região", x = "Índice da Região", y = "MSE") + theme_bw()
+
+ggsave("plots_output/w_estimado_vs_true.png", p_w1, width = 8, height = 6)
+ggsave("plots_output/w_vies_por_regiao.png", p_w2, width = 10, height = 5)
+ggsave("plots_output/w_mse_por_regiao.png", p_w3, width = 10, height = 5)
+# Exibir painel combinado
+grid.arrange(p_w1, p_w2, p_w3, ncol = 1)
 # ==============================================================================
 # 6. FINALIZAÇÃO
 # ==============================================================================

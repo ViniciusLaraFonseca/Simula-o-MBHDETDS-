@@ -125,7 +125,7 @@ code_dynamic_gamma <- nimbleCode({
     beta[j] ~ dnorm(mu_beta[j], sd = 10)
   }
   #Priors W
-  for (i in vector) {
+  for (i in 1:n_regions) {
     w[i] ~ dunif(min = li_w,max = ls_w)
   }
   # Priors Gamma
@@ -177,7 +177,7 @@ conf$addSampler(target = "lambda", type = ffbs_sampler_Lambda_it,
                                a0 = constants_nimble$a0, b0 = constants_nimble$b0))
 
 # CORREÇÃO: Monitorar logLik_Y
-conf$addMonitors(c("beta", "gamma", "lambda", "epsilon", "logLik_Y"))
+conf$addMonitors(c("beta", "gamma", "lambda", "epsilon", "logLik_Y","w"))
 
 cat("--- Compilando ---\n")
 Cmodel <- compileNimble(model)
@@ -372,6 +372,104 @@ p5 <- ggplot(df_eps_diag, aes(x=Time)) + geom_ribbon(aes(ymin=Lower, ymax=Upper)
   facet_wrap(~Cluster, scales="fixed") + theme_bw() + labs(title="Diagnóstico Epsilon Médio")
 ggsave("plots_output/diagnostico_epsilon_medio.png", p5, width=10, height=8)
 
+
+# 1. Extração e Cálculo de Métricas por Região
+# ------------------------------------------------------------------------------
+cat("Calculando métricas para os 75 w's...\n")
+
+# Dataframe para armazenar resultados
+df_w_results <- data.frame(
+  Region = 1:75,
+  True = w_true,  # Do script ValoresIniciais.R
+  Est_Mean = NA,
+  Est_Lower = NA,
+  Est_Upper = NA,
+  Bias = NA,
+  MSE = NA,
+  Coverage95 = NA
+)
+
+# Loop para extrair amostras de cada w[i]
+for(i in 1:75) {
+  param_name <- paste0("w[", i, "]")
+  
+  if(param_name %in% colnames(samples_mat)) {
+    # Extrair vetor de amostras
+    samp_vec <- samples_mat[, param_name]
+    
+    # Cálculos
+    mean_val <- mean(samp_vec)
+    ci       <- quantile(samp_vec, probs = c(0.025, 0.975))
+    true_val <- w_true[i]
+    
+    # Preencher DF
+    df_w_results$Est_Mean[i]  <- mean_val
+    df_w_results$Est_Lower[i] <- ci[1]
+    df_w_results$Est_Upper[i] <- ci[2]
+    df_w_results$Bias[i]      <- mean_val - true_val
+    df_w_results$MSE[i]       <- (mean_val - true_val)^2 + var(samp_vec)
+    df_w_results$Coverage95[i] <- as.integer(true_val >= ci[1] & true_val <= ci[2])
+  } else {
+    warning(paste("Parâmetro", param_name, "não encontrado nas amostras!"))
+  }
+}
+
+# 2. Métricas Gerais (Resumo Global)
+# ------------------------------------------------------------------------------
+# Respondendo à sua pergunta sobre métricas globais:
+global_metrics <- data.frame(
+  Metric = c("Average Bias", "Global RMSE", "Average MSE", "Coverage Rate (95%)"),
+  Value = c(
+    mean(df_w_results$Bias, na.rm=TRUE),
+    sqrt(mean(df_w_results$MSE, na.rm=TRUE)), # RMSE é a raiz do MSE médio
+    mean(df_w_results$MSE, na.rm=TRUE),
+    mean(df_w_results$Coverage95, na.rm=TRUE) # Idealmente próximo de 0.95
+  )
+)
+
+print("--- Métricas Globais para w ---")
+print(global_metrics)
+write.csv(global_metrics, "metricas_globais_w.csv", row.names = FALSE)
+
+# 3. Gráficos de Diagnóstico
+# ------------------------------------------------------------------------------
+
+# Gráfico A: Estimado vs Verdadeiro (Ideal para muitos parâmetros)
+# Se o ajuste for perfeito, os pontos caem na linha diagonal vermelha
+p_w1 <- ggplot(df_w_results, aes(x = True, y = Est_Mean)) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+  geom_errorbar(aes(ymin = Est_Lower, ymax = Est_Upper), color = "grey70", width = 0.005) +
+  geom_point(color = "blue", size = 2, alpha = 0.7) +
+  labs(title = "Recuperação do w: Estimado vs Verdadeiro",
+       subtitle = "Barras cinzas indicam IC 95%",
+       x = "w Verdadeiro", y = "w Estimado (Média a Posteriori)") +
+  theme_bw()
+
+# Gráfico B: Viés por Região (Lollipop chart)
+# Ajuda a identificar se alguma região específica está muito enviesada
+p_w2 <- ggplot(df_w_results, aes(x = Region, y = Bias)) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_segment(aes(x = Region, xend = Region, y = 0, yend = Bias), color = "grey50") +
+  geom_point(aes(color = abs(Bias)), size = 2) +
+  scale_color_gradient(low = "blue", high = "red", name = "|Viés|") +
+  labs(title = "Viés do w por Região",
+       x = "Índice da Região", y = "Viés (Média - True)") +
+  theme_bw()
+
+# Gráfico C: EQM (MSE) por Região
+p_w3 <- ggplot(df_w_results, aes(x = Region, y = MSE)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.8) +
+  labs(title = "Erro Quadrático Médio (MSE) por Região",
+       x = "Índice da Região", y = "MSE") +
+  theme_bw()
+
+# Salvar Gráficos
+ggsave("plots_output/w_estimado_vs_true.png", p_w1, width = 8, height = 6)
+ggsave("plots_output/w_vies_por_regiao.png", p_w2, width = 10, height = 5)
+ggsave("plots_output/w_mse_por_regiao.png", p_w3, width = 10, height = 5)
+
+# Exibir painel combinado
+grid.arrange(p_w1, p_w2, p_w3, ncol = 1)
 # ==============================================================================
 # 6. FINALIZAÇÃO
 # ==============================================================================
